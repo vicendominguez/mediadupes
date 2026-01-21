@@ -1,4 +1,4 @@
-module photo-dedup
+module github.com/vicendominguez/mediadupes
 
 go 1.25.5
 

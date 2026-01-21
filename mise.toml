@@ -12,7 +12,7 @@ run = "./mediadupes -s . -d MEDIADUPES"
 
 [tasks.clean]
 description = "Remove built binary"
-run = "rm -f mediadupes photo-dedup"
+run = "rm -f mediadupes"
 
 [tasks.test]
 description = "Run tests"
