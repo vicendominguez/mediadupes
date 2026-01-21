@@ -94,6 +94,29 @@ Check space savings without copying:
 mediadupes -s ./photos --plan
 ```
 
+Example output:
+```
+Summary
+
+Files:
+    Total: 15689 (52.6 GB)
+    Unique: 14123 (43.2 GB)
+    Duplicates: 1566
+    Savings: 9.4 GB (17.8%)
+
+By Type:
+    Images: 13898 files (19.4 GB)
+    Videos: 1791 files (23.8 GB)
+
+Metadata:
+    With EXIF: 15584 files
+    Without EXIF: 105 files
+
+Performance:
+    Workers: 12
+    Time: 19.1s
+```
+
 Only top-level directory (no recursion):
 ```bash
 mediadupes -s ./photos -d output --no-recursive
