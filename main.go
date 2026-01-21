@@ -154,7 +154,7 @@ var (
 	failedScan  atomic.Int64
 	failedCopy  atomic.Int64
 	progChan    chan progressMsg
-	version     = "0.1.1"
+	version     = "0.1.2"
 )
 
 func getCreationDate(et *exiftool.Exiftool, filePath string) (time.Time, bool) {
@@ -223,7 +223,7 @@ func walkFiles(source string, pathChan chan<- string, validExts map[string]bool,
 		return
 	}
 
-	filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
+	if err := filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -241,7 +241,9 @@ func walkFiles(source string, pathChan chan<- string, validExts map[string]bool,
 			pathChan <- path
 		}
 		return nil
-	})
+	}); err != nil {
+		progChan <- progressMsg{errorFile: source, errorMsg: fmt.Sprintf("walk dir: %v", err)}
+	}
 }
 
 func worker(et *exiftool.Exiftool, source string, pathChan <-chan string, resultChan chan<- FileInfo, total *atomic.Int64, checkMeta bool, stage string, imageExts map[string]bool) {
@@ -373,7 +375,10 @@ func formatBytes(bytes int64) string {
 }
 
 func copyFiles(files map[string]*FileInfo, dest string, parallel int, checkMeta, oneDir bool) {
-	os.MkdirAll(dest, 0755)
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		progChan <- progressMsg{errorFile: dest, errorMsg: fmt.Sprintf("mkdir dest: %v", err)}
+		return
+	}
 
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
@@ -417,7 +422,7 @@ func copyFiles(files map[string]*FileInfo, dest string, parallel int, checkMeta,
 
 			if _, err := io.Copy(dst, src); err == nil {
 				if checkMeta && fi.HasMeta && !fi.CreationDate.IsZero() {
-					os.Chtimes(destPath, fi.CreationDate, fi.CreationDate)
+					_ = os.Chtimes(destPath, fi.CreationDate, fi.CreationDate)
 				}
 				current := copied.Add(1)
 				progChan <- progressMsg{stage: "💾 Copying files...", current: current, total: total, currentFile: fi.Path}
@@ -441,18 +446,24 @@ func runDedup(source, dest string, workers, copyParallel int, validExts map[stri
 	m := model{progress: prog, verbose: verbose, width: 80}
 
 	p := tea.NewProgram(m)
-	go p.Run()
+	go func() {
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running UI: %v\n", err)
+		}
+	}()
 	
 	time.Sleep(50 * time.Millisecond)
 	progChan <- progressMsg{stage: "🔍 Counting files...", current: 0, total: 1}
 
 	var totalFiles atomic.Int64
-	filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
+	if err := filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && validExts[strings.ToLower(filepath.Ext(path))] {
 			totalFiles.Add(1)
 		}
 		return nil
-	})
+	}); err != nil {
+		progChan <- progressMsg{errorFile: source, errorMsg: fmt.Sprintf("count files: %v", err)}
+	}
 
 	go func() {
 		for msg := range progChan {
