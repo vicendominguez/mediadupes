@@ -34,7 +34,37 @@ jobs:
 
       - name: Install exiftool (Windows)
         if: runner.os == 'Windows'
-        run: choco install exiftool -y
+        shell: powershell
+        run: |
+          # Try chocolatey first with retry
+          $maxAttempts = 3
+          $attempt = 0
+          $installed = $false
+          
+          while ($attempt -lt $maxAttempts -and -not $installed) {
+            $attempt++
+            Write-Host "Attempt $attempt of $maxAttempts..."
+            try {
+              choco install exiftool -y --no-progress
+              $installed = $true
+            } catch {
+              if ($attempt -lt $maxAttempts) {
+                Write-Host "Failed, waiting 10 seconds before retry..."
+                Start-Sleep -Seconds 10
+              }
+            }
+          }
+          
+          # Fallback: direct download if chocolatey fails
+          if (-not $installed) {
+            Write-Host "Chocolatey failed, downloading directly..."
+            $url = "https://exiftool.org/exiftool-12.76.zip"
+            $output = "$env:TEMP\exiftool.zip"
+            Invoke-WebRequest -Uri $url -OutFile $output
+            Expand-Archive -Path $output -DestinationPath "$env:TEMP\exiftool"
+            Rename-Item "$env:TEMP\exiftool\exiftool(-k).exe" "$env:TEMP\exiftool\exiftool.exe"
+            echo "$env:TEMP\exiftool" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
 
       - name: Build
         run: go build -v ./...
