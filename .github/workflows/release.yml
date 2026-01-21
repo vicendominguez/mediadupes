@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            output: mediadupes.exe
+          - goos: darwin
+            goarch: arm64
+            output: mediadupes
+          - goos: darwin
+            goarch: amd64
+            output: mediadupes
+          - goos: linux
+            goarch: amd64
+            output: mediadupes
+          - goos: linux
+            goarch: arm64
+            output: mediadupes
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w" -o ${{ matrix.output }} main.go
+          
+      - name: Create archive
+        run: |
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip mediadupes-${{ matrix.goos }}-${{ matrix.goarch }}.zip ${{ matrix.output }}
+          else
+            tar czf mediadupes-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz ${{ matrix.output }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediadupes-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            *.zip
+            *.tar.gz
+
+  build-deb:
+    name: Build DEB package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: go build -ldflags="-s -w" -o mediadupes main.go
+
+      - name: Create DEB package structure
+        run: |
+          mkdir -p mediadupes_${{ steps.version.outputs.VERSION }}_amd64/DEBIAN
+          mkdir -p mediadupes_${{ steps.version.outputs.VERSION }}_amd64/usr/bin
+          mkdir -p mediadupes_${{ steps.version.outputs.VERSION }}_amd64/usr/share/doc/mediadupes
+          
+          cp mediadupes mediadupes_${{ steps.version.outputs.VERSION }}_amd64/usr/bin/
+          chmod +x mediadupes_${{ steps.version.outputs.VERSION }}_amd64/usr/bin/mediadupes
+          
+          cp README.md mediadupes_${{ steps.version.outputs.VERSION }}_amd64/usr/share/doc/mediadupes/
+
+      - name: Create control file
+        run: |
+          cat > mediadupes_${{ steps.version.outputs.VERSION }}_amd64/DEBIAN/control << EOF
+          Package: mediadupes
+          Version: ${{ steps.version.outputs.VERSION }}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Depends: libimage-exiftool-perl
+          Maintainer: mediadupes <@github.com/vicendominguez/mediadupes>
+          Description: Fast, parallel media deduplicator with EXIF metadata support
+           Deduplicates photos and videos by filename, prioritizes files with EXIF
+           metadata, and organizes by metadata presence.
+          EOF
+
+      - name: Build DEB package
+        run: dpkg-deb --build mediadupes_${{ steps.version.outputs.VERSION }}_amd64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediadupes-deb
+          path: mediadupes_*.deb
+
+  release:
+    name: Create Release
+    needs: [build, build-deb]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.tar.gz
+            artifacts/**/*.deb
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
