@@ -154,7 +154,7 @@ var (
 	failedScan  atomic.Int64
 	failedCopy  atomic.Int64
 	progChan    chan progressMsg
-	version     = "0.1.0"
+	version     = "0.1.1"
 )
 
 func getCreationDate(et *exiftool.Exiftool, filePath string) (time.Time, bool) {
