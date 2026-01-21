@@ -1,0 +1,31 @@
+[tasks.build]
+description = "Build mediadupes binary"
+run = "go build -o mediadupes main.go"
+
+[tasks.install]
+description = "Install mediadupes to $GOPATH/bin"
+run = "go install"
+
+[tasks.run]
+description = "Run mediadupes with default settings"
+run = "./mediadupes -s . -d MEDIADUPES"
+
+[tasks.clean]
+description = "Remove built binary"
+run = "rm -f mediadupes photo-dedup"
+
+[tasks.test]
+description = "Run tests"
+run = "go test -v ./..."
+
+[tasks.fmt]
+description = "Format code"
+run = "go fmt ./..."
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.tidy]
+description = "Tidy go modules"
+run = "go mod tidy"
