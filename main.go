@@ -28,6 +28,22 @@ type FileInfo struct {
 	IsImage      bool
 }
 
+type Config struct {
+	Source          string
+	Dest            string
+	Workers         int
+	CopyParallel    int
+	ValidExts       map[string]bool
+	ImageExts       map[string]bool
+	Recursive       bool
+	CheckMeta       bool
+	EnableDedup     bool
+	PlanOnly        bool
+	OneDir          bool
+	Verbose         bool
+	ExcludePatterns []string
+}
+
 type progressMsg struct {
 	stage       string
 	current     int64
@@ -154,7 +170,7 @@ var (
 	failedScan  atomic.Int64
 	failedCopy  atomic.Int64
 	progChan    chan progressMsg
-	version     = "0.1.2"
+	version     = "0.1.3"
 )
 
 func getCreationDate(et *exiftool.Exiftool, filePath string) (time.Time, bool) {
@@ -199,10 +215,10 @@ func shouldExclude(path string, excludePatterns []string) bool {
 	return false
 }
 
-func walkFiles(source string, pathChan chan<- string, validExts map[string]bool, recursive bool, excludePatterns []string) {
+func walkFiles(source string, pathChan chan<- string, cfg *Config) {
 	defer close(pathChan)
 
-	if !recursive {
+	if !cfg.Recursive {
 		entries, err := os.ReadDir(source)
 		if err != nil {
 			return
@@ -212,11 +228,11 @@ func walkFiles(source string, pathChan chan<- string, validExts map[string]bool,
 				continue
 			}
 			path := filepath.Join(source, entry.Name())
-			if shouldExclude(path, excludePatterns) {
+			if shouldExclude(path, cfg.ExcludePatterns) {
 				continue
 			}
 			ext := strings.ToLower(filepath.Ext(path))
-			if validExts[ext] {
+			if cfg.ValidExts[ext] {
 				pathChan <- path
 			}
 		}
@@ -228,16 +244,16 @@ func walkFiles(source string, pathChan chan<- string, validExts map[string]bool,
 			return nil
 		}
 		if d.IsDir() {
-			if shouldExclude(path, excludePatterns) {
+			if shouldExclude(path, cfg.ExcludePatterns) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if shouldExclude(path, excludePatterns) {
+		if shouldExclude(path, cfg.ExcludePatterns) {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
-		if validExts[ext] {
+		if cfg.ValidExts[ext] {
 			pathChan <- path
 		}
 		return nil
@@ -246,7 +262,7 @@ func walkFiles(source string, pathChan chan<- string, validExts map[string]bool,
 	}
 }
 
-func worker(et *exiftool.Exiftool, source string, pathChan <-chan string, resultChan chan<- FileInfo, total *atomic.Int64, checkMeta bool, stage string, imageExts map[string]bool) {
+func worker(et *exiftool.Exiftool, source string, pathChan <-chan string, resultChan chan<- FileInfo, total *atomic.Int64, cfg *Config, stage string) {
 	for path := range pathChan {
 		stat, err := os.Stat(path)
 		if err != nil {
@@ -265,7 +281,7 @@ func worker(et *exiftool.Exiftool, source string, pathChan <-chan string, result
 		
 		var creationDate time.Time
 		var hasMeta bool
-		if checkMeta {
+		if cfg.CheckMeta {
 			creationDate, hasMeta = getCreationDate(et, path)
 		}
 
@@ -276,7 +292,7 @@ func worker(et *exiftool.Exiftool, source string, pathChan <-chan string, result
 			BaseName:     baseName,
 			HasMeta:      hasMeta,
 			CreationDate: creationDate,
-			IsImage:      imageExts[strings.ToLower(ext)],
+			IsImage:      cfg.ImageExts[strings.ToLower(ext)],
 		}
 
 		resultChan <- info
@@ -296,7 +312,7 @@ type Stats struct {
 	WithoutMeta  int
 }
 
-func deduplicate(resultChan <-chan FileInfo, enableDedup bool) (map[string]*FileInfo, Stats) {
+func deduplicate(resultChan <-chan FileInfo, cfg *Config) (map[string]*FileInfo, Stats) {
 	dedup := make(map[string]*FileInfo)
 	var mu sync.Mutex
 	stats := Stats{}
@@ -329,7 +345,7 @@ func deduplicate(resultChan <-chan FileInfo, enableDedup bool) (map[string]*File
 			stats.WithoutMeta++
 		}
 		
-		if !enableDedup {
+		if !cfg.EnableDedup {
 			key := info.Path
 			dedup[key] = &info
 			stats.UniqueSize += info.Size
@@ -374,13 +390,13 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func copyFiles(files map[string]*FileInfo, dest string, parallel int, checkMeta, oneDir bool) {
-	if err := os.MkdirAll(dest, 0755); err != nil {
-		progChan <- progressMsg{errorFile: dest, errorMsg: fmt.Sprintf("mkdir dest: %v", err)}
+func copyFiles(files map[string]*FileInfo, cfg *Config) {
+	if err := os.MkdirAll(cfg.Dest, 0755); err != nil {
+		progChan <- progressMsg{errorFile: cfg.Dest, errorMsg: fmt.Sprintf("mkdir dest: %v", err)}
 		return
 	}
 
-	sem := make(chan struct{}, parallel)
+	sem := make(chan struct{}, cfg.CopyParallel)
 	var wg sync.WaitGroup
 	total := int64(len(files))
 
@@ -400,10 +416,10 @@ func copyFiles(files map[string]*FileInfo, dest string, parallel int, checkMeta,
 			defer src.Close()
 
 			var destPath string
-			if oneDir {
-				destPath = filepath.Join(dest, filepath.Base(fi.Path))
+			if cfg.OneDir {
+				destPath = filepath.Join(cfg.Dest, filepath.Base(fi.Path))
 			} else {
-				destPath = filepath.Join(dest, fi.RelPath)
+				destPath = filepath.Join(cfg.Dest, fi.RelPath)
 			}
 			
 			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
@@ -421,7 +437,7 @@ func copyFiles(files map[string]*FileInfo, dest string, parallel int, checkMeta,
 			defer dst.Close()
 
 			if _, err := io.Copy(dst, src); err == nil {
-				if checkMeta && fi.HasMeta && !fi.CreationDate.IsZero() {
+				if cfg.CheckMeta && fi.HasMeta && !fi.CreationDate.IsZero() {
 					_ = os.Chtimes(destPath, fi.CreationDate, fi.CreationDate)
 				}
 				current := copied.Add(1)
@@ -436,14 +452,14 @@ func copyFiles(files map[string]*FileInfo, dest string, parallel int, checkMeta,
 	wg.Wait()
 }
 
-func runDedup(source, dest string, workers, copyParallel int, validExts map[string]bool, imageExts map[string]bool, recursive, checkMeta, enableDedup, planOnly, oneDir, verbose bool, excludePatterns []string) error {
-	if _, err := os.Stat(source); os.IsNotExist(err) {
-		return fmt.Errorf("source directory '%s' does not exist", source)
+func runDedup(cfg *Config) error {
+	if _, err := os.Stat(cfg.Source); os.IsNotExist(err) {
+		return fmt.Errorf("source directory '%s' does not exist", cfg.Source)
 	}
 
 	progChan = make(chan progressMsg, 10)
 	prog := progress.New(progress.WithDefaultGradient())
-	m := model{progress: prog, verbose: verbose, width: 80}
+	m := model{progress: prog, verbose: cfg.Verbose, width: 80}
 
 	p := tea.NewProgram(m)
 	go func() {
@@ -456,13 +472,13 @@ func runDedup(source, dest string, workers, copyParallel int, validExts map[stri
 	progChan <- progressMsg{stage: "🔍 Counting files...", current: 0, total: 1}
 
 	var totalFiles atomic.Int64
-	if err := filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && validExts[strings.ToLower(filepath.Ext(path))] {
+	if err := filepath.WalkDir(cfg.Source, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && cfg.ValidExts[strings.ToLower(filepath.Ext(path))] {
 			totalFiles.Add(1)
 		}
 		return nil
 	}); err != nil {
-		progChan <- progressMsg{errorFile: source, errorMsg: fmt.Sprintf("count files: %v", err)}
+		progChan <- progressMsg{errorFile: cfg.Source, errorMsg: fmt.Sprintf("count files: %v", err)}
 	}
 
 	go func() {
@@ -474,11 +490,11 @@ func runDedup(source, dest string, workers, copyParallel int, validExts map[stri
 	pathChan := make(chan string, 1000)
 	resultChan := make(chan FileInfo, 100)
 
-	go walkFiles(source, pathChan, validExts, recursive, excludePatterns)
+	go walkFiles(cfg.Source, pathChan, cfg)
 
 	var wg sync.WaitGroup
 	startTime := time.Now()
-	for i := 0; i < workers; i++ {
+	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -490,7 +506,7 @@ func runDedup(source, dest string, workers, copyParallel int, validExts map[stri
 			}
 			defer et.Close()
 			
-			worker(et, source, pathChan, resultChan, &totalFiles, checkMeta, "📁 Scanning files...", imageExts)
+			worker(et, cfg.Source, pathChan, resultChan, &totalFiles, cfg, "📁 Scanning files...")
 		}()
 	}
 
@@ -499,11 +515,11 @@ func runDedup(source, dest string, workers, copyParallel int, validExts map[stri
 		close(resultChan)
 	}()
 
-	dedup, stats := deduplicate(resultChan, enableDedup)
+	dedup, stats := deduplicate(resultChan, cfg)
 	unique.Store(int64(len(dedup)))
 	elapsed := time.Since(startTime)
 
-	if planOnly {
+	if cfg.PlanOnly {
 		savings := stats.TotalSize - stats.UniqueSize
 		savingsPercent := 0.0
 		if stats.TotalSize > 0 {
@@ -540,7 +556,7 @@ func runDedup(source, dest string, workers, copyParallel int, validExts map[stri
 			labelStyle.Render("  With EXIF:"), stats.WithMeta,
 			labelStyle.Render("  Without EXIF:"), stats.WithoutMeta,
 			labelStyle.Render("Performance:"),
-			labelStyle.Render("  Workers:"), workers,
+			labelStyle.Render("  Workers:"), cfg.Workers,
 			labelStyle.Render("  Time:"), elapsed.Seconds())
 		
 		progChan <- progressMsg{done: true, summary: summary}
@@ -548,7 +564,7 @@ func runDedup(source, dest string, workers, copyParallel int, validExts map[stri
 		return nil
 	}
 
-	copyFiles(dedup, dest, copyParallel, checkMeta, oneDir)
+	copyFiles(dedup, cfg)
 
 	failedScanCount := failedScan.Load()
 	failedCopyCount := failedCopy.Load()
@@ -560,6 +576,50 @@ func runDedup(source, dest string, workers, copyParallel int, validExts map[stri
 	time.Sleep(200 * time.Millisecond)
 
 	return nil
+}
+
+func buildConfig(source, dest string, workers, copyParallel int, imageExts, videoExts, excludeStr string, noRecursive, noMeta, noDedup, planOnly, oneDir, verbose bool, excludeChanged bool) *Config {
+	validExts := make(map[string]bool)
+	imageExtsMap := make(map[string]bool)
+	
+	for _, ext := range strings.Split(imageExts, ",") {
+		if ext = strings.TrimSpace(ext); ext != "" {
+			validExts[strings.ToLower(ext)] = true
+			imageExtsMap[strings.ToLower(ext)] = true
+		}
+	}
+	for _, ext := range strings.Split(videoExts, ",") {
+		if ext = strings.TrimSpace(ext); ext != "" {
+			validExts[strings.ToLower(ext)] = true
+		}
+	}
+	
+	var excludePatterns []string
+	if excludeChanged {
+		for _, pattern := range strings.Split(excludeStr, ",") {
+			if pattern = strings.TrimSpace(pattern); pattern != "" {
+				excludePatterns = append(excludePatterns, pattern)
+			}
+		}
+	} else {
+		excludePatterns = []string{".*"}
+	}
+	
+	return &Config{
+		Source:          source,
+		Dest:            dest,
+		Workers:         workers,
+		CopyParallel:    copyParallel,
+		ValidExts:       validExts,
+		ImageExts:       imageExtsMap,
+		Recursive:       !noRecursive,
+		CheckMeta:       !noMeta,
+		EnableDedup:     !noDedup,
+		PlanOnly:        planOnly,
+		OneDir:          oneDir,
+		Verbose:         verbose,
+		ExcludePatterns: excludePatterns,
+	}
 }
 
 func main() {
@@ -582,41 +642,21 @@ func main() {
 				return cmd.Help()
 			}
 			
-			validExts := make(map[string]bool)
-			imageExtsMap := make(map[string]bool)
-			for _, ext := range strings.Split(imageExts, ",") {
-				if ext = strings.TrimSpace(ext); ext != "" {
-					validExts[strings.ToLower(ext)] = true
-					imageExtsMap[strings.ToLower(ext)] = true
-				}
-			}
-			for _, ext := range strings.Split(videoExts, ",") {
-				if ext = strings.TrimSpace(ext); ext != "" {
-					validExts[strings.ToLower(ext)] = true
-				}
-			}
+			cfg := buildConfig(
+				source, dest, workers, copyParallel,
+				imageExts, videoExts, excludeStr,
+				noRecursive, noMeta, noDedup, planOnly, oneDir, verbose,
+				cmd.Flags().Changed("exclude"),
+			)
 			
-			var excludePatterns []string
-			if cmd.Flags().Changed("exclude") {
-				// Usuario especificó --exclude, usar solo esos patrones
-				for _, pattern := range strings.Split(excludeStr, ",") {
-					if pattern = strings.TrimSpace(pattern); pattern != "" {
-						excludePatterns = append(excludePatterns, pattern)
-					}
-				}
-			} else {
-				// Por defecto: excluir directorios con punto
-				excludePatterns = []string{".*"}
-			}
-			
-			return runDedup(source, dest, workers, copyParallel, validExts, imageExtsMap, !noRecursive, !noMeta, !noDedup, planOnly, oneDir, verbose, excludePatterns)
+			return runDedup(cfg)
 		},
 	}
 
 	rootCmd.Flags().StringVarP(&source, "source", "s", ".", "Source directory (default: current directory)")
 	rootCmd.Flags().StringVarP(&dest, "dest", "d", "MEDIADUPES", "Destination directory (default: MEDIADUPES)")
-	rootCmd.Flags().IntVarP(&workers, "workers", "w", runtime.NumCPU(), "Number of workers (default: CPU count)")
-	rootCmd.Flags().IntVarP(&copyParallel, "copy-parallel", "c", 4, "Parallel copy operations (default: 4)")
+	rootCmd.Flags().IntVarP(&workers, "workers", "w", runtime.NumCPU(), "Number of workers for scanning and EXIF processing (CPU-bound, default: CPU count)")
+	rootCmd.Flags().IntVarP(&copyParallel, "copy-parallel", "c", 4, "Parallel file copy operations (I/O-bound, default: 4, increase for SSDs)")
 	rootCmd.Flags().StringVar(&imageExts, "image-exts", ".jpg,.jpeg,.png,.heic,.heif", "Image extensions (default: .jpg,.jpeg,.png,.heic,.heif)")
 	rootCmd.Flags().StringVar(&videoExts, "video-exts", ".mp4,.mov,.avi,.mkv,.m4v", "Video extensions (default: .mp4,.mov,.avi,.mkv,.m4v)")
 	rootCmd.Flags().StringVar(&excludeStr, "exclude", "", "Exclude patterns (default: directories starting with '.', override with comma-separated patterns)")
